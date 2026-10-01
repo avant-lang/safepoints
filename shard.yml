@@ -1,0 +1,19 @@
+name: myc_llvm_safepoints
+version: 0.1.0
+
+authors:
+  - Paulo Coghi
+  - Avant contributors
+
+crystal: '>= 1.19.1'
+
+license: Apache-2.0
+
+dependencies:
+  myc:
+    github: kostya/myc
+    commit: 87622d7ca43dfc01bf6482f9c0d60916a500610b
+
+targets:
+  myc-llvm:
+    main: src/cli.cr

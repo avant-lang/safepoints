@@ -1,0 +1,10 @@
+version: 2.0
+shards:
+  clang:
+    git: https://github.com/kostya/clang.cr.git
+    version: 0.4.0
+
+  myc:
+    git: https://github.com/kostya/myc.git
+    version: 0.11.0-dev+git.commit.87622d7ca43dfc01bf6482f9c0d60916a500610b
+
