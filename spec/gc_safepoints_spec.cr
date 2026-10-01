@@ -145,4 +145,35 @@ describe "GC safepoints (llvm)" do
       File.delete(obj) if File.exists?(obj)
     end
   end
+
+  it "emits statepoints when a collecting call returns a pointer" do
+    src = <<-MYC
+    FUNC :gc_root
+      ARGS
+        TYPE :ptr<void>
+    ENDFUNC
+
+    FUNC :make
+      RETURN
+        TYPE :ptr<void>
+    ENDFUNC
+
+    FUNC :main
+      BODY
+        PUSH 8
+        MALLOC :i8
+        AS :ptr<void>
+        LOCAL :keep :ptr<void>
+        STORE
+        CALL :make
+        LOCAL :p :ptr<void>
+        STORE
+    ENDFUNC
+    MYC
+    with_gc_ir(src) do |backend, _|
+      ll = backend.spec_dump_text
+      ll.should contain("llvm.experimental.gc.statepoint")
+      ll.should contain("llvm.experimental.gc.relocate")
+    end
+  end
 end

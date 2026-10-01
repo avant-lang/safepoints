@@ -1,5 +1,3 @@
-require "myc"
-require "../lib/myc/src/backend/llvm/all"
 require "./myc_llvm_safepoints"
 
 class Myc::Cli::Llvm < Myc::Cli

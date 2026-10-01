@@ -4,11 +4,8 @@ class Myc::Backend::Llvm::Builder < Myc::Backend::AbstractBuilder
   end
 
   def generate_obj(filename)
-    Myc.debug(:compile) { "Generate Obj #{filename}" }
-    target_machine.emit_obj_to_file llvm_mod, filename
-    mark_llvm_stackmaps_writable(filename) if gc_safepoints
-  rescue ex
-    puts "GenerateObj failed with #{ex.inspect}"
+    previous_def
+    mark_llvm_stackmaps_writable(filename) if gc_safepoints && File.exists?(filename)
   end
 
   # LLVM emits .llvm_stackmaps as SHF_ALLOC only. Function-address

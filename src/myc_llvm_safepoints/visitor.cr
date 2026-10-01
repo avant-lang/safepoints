@@ -1,58 +1,20 @@
+# kostya/myc#10: do not copy AbstractVisitor#initialize. Class-body
+# ivars are initialized before myc's initialize, so myc can add fields
+# without this shard going stale.
 abstract class Myc::Backend::AbstractVisitor
-  def initialize(@builder, @func, @bb, @func_def, @mod, @header_mod, @params)
-    @stack = Deque(Value).new
-    @loop_finish_stack = Deque(AbstractBB).new
-    @loop_step_stack = Deque(AbstractBB).new
-    @locals = Hash(String, Value).new
-    @current_op = @func_def.body.not_nil!
-    @unique_id = 0_u64
-    @was_ret = false
-    @pending_labels = Hash(String, AbstractBB).new
-    @labels = Hash(String, AbstractBB).new
-    @fake_bb = func.new_raw_bb("__myc_fake_bb__")
-    @slots = Deque(Hash(String, Value)).new
-    @all_slots = Hash(String, Value).new
-    @instruction_id = 0_u32
-    @gc_spill = {} of String => Value
-    @gc_root_slots = [] of Value
-    @gc_seen_locals = Set(String).new
-  end
+  @gc_spill = {} of String => Value
+  @gc_root_slots = [] of Value
+  @gc_seen_locals = Set(String).new
 
   def visit(op : Opcode::Call)
     type_fn = find_func_type_fn(op.name)
-    raise error("func #{op.name} not found") unless type_fn
-
     gc_safepoint_before_call(op.name)
-
-    types = type_fn.args
-    args = types.size.times.map do |index|
-      arg = pop_rhs
-      if arg.type.eq?(types[index])
-        arg
-      else
-        if arg2 = @bb.to?(arg, arg.type, types[index])
-          arg2
-        else
-          raise error("bad arg #{index} type, expected: #{types[index]}, got: #{arg.type}, type_fn: #{type_fn.id_name}")
-        end
-      end
-    end.to_a
-
-    if type_fn.vaarg
-      op.vaargs_count.times do
-        last_va_extend
-        args << pop_rhs
-      end
-    else
-      if op.vaargs_count > 0
-        raise error("function #{op.name} have no vaargs, but passes #{op.vaargs_count}")
-      end
-    end
     if gc_safepoints? && gc_call_may_collect?(op.name)
       @bb.gc_set_stackmap_lives(gc_collect_stackmap_lives)
     end
-    if value = @bb.call(op.name, type_fn, args)
-      self << gc_root_call_result(value)
+    previous_def
+    if type_fn && !type_fn.ret.eq?(@mod.typer.void)
+      @stack[@stack.size - 1] = gc_root_call_result(@stack.last)
     else
       gc_safepoint_after_void(op.name)
     end
@@ -61,78 +23,21 @@ abstract class Myc::Backend::AbstractVisitor
 
   def visit(op : Opcode::Invoke)
     gc_safepoint_before_call(nil)
-    fn_ptr = pop_rhs
-
-    case type_fn = fn_ptr.type
-    when Type::Fn
-    else
-      raise error("INVOKE expected fn type, got #{type_fn}")
-    end
-
-    types = type_fn.args
-    args = types.size.times.map do |index|
-      arg = pop_rhs
-      if arg.type.eq?(types[index])
-        arg
-      else
-        if arg2 = @bb.to?(arg, arg.type, types[index])
-          arg2
-        else
-          raise error("bad arg #{index} type, expected: #{types[index]}, got: #{arg.type}, type_fn: #{type_fn.id_name}")
-        end
-      end
-    end.to_a
-
-    if type_fn.vaarg
-      op.vaargs_count.times do
-        last_va_extend
-        args << pop_rhs
-      end
-    else
-      if op.vaargs_count > 0
-        raise error("function pointer has no vaargs, but passes #{op.vaargs_count}")
-      end
-    end
     if gc_safepoints?
       @bb.gc_set_stackmap_lives(gc_collect_stackmap_lives)
     end
-
-    case _pp = fn_ptr.pp
-    when Value::PP::FnAddress
-      if value = @bb.call(_pp.name, type_fn, args)
-        self << gc_root_call_result(value)
-      end
-    else
-      if value = @bb.invoke(fn_ptr, type_fn, args)
-        self << gc_root_call_result(value)
+    ret_void = true
+    unless @stack.empty?
+      case fn_ty = @stack.last.type
+      when Type::Fn
+        ret_void = fn_ty.ret.eq?(@mod.typer.void)
       end
     end
+    previous_def
+    unless ret_void
+      @stack[@stack.size - 1] = gc_root_call_result(@stack.last)
+    end
     gc_safepoint_reload_after(nil)
-  end
-
-  private def <<(v : Value)
-    @stack << v
-  end
-
-  private def pop : Value
-    raise error("empty stack") if @stack.empty?
-    @stack.pop
-  end
-
-  private def last : Value
-    raise error("empty stack") if @stack.empty?
-    @stack.last
-  end
-
-  private def pop_rhs : Value
-    pop.to_rhs(self)
-  end
-
-  private def find_func_type_fn(name : String) : Type::Fn?
-    @mod.func_defs[name]?.try(&.type_fn) ||
-      @header_mod.func_defs[name]?.try(&.type_fn) ||
-      @builder.std_funcs[name]? ||
-      @builder.inspect_type_fns[name]?.try(&.type_fn)
   end
 
   private def gc_safepoints?
