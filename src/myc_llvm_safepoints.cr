@@ -1,4 +1,5 @@
 require "myc"
+require "myc/backend/llvm/all"
 require "./myc_llvm_safepoints/extend_llvm"
 require "./myc_llvm_safepoints/config"
 require "./myc_llvm_safepoints/type"

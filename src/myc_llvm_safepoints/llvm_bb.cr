@@ -1,34 +1,20 @@
 class Myc::Backend::Llvm::BB < Myc::Backend::AbstractBB
-  def initialize(@name, @builder, @func, @func_def)
-    super
-
-    @llvm_bb = @func.as(Func).link.llvm_function.basic_blocks.append @name
-    @llvm_builder = @builder.as(Builder).context.new_builder
-    @llvm_builder.position_at_end(@llvm_bb)
-    @gc_stackmap_lives = [] of Value
-  end
+  @gc_stackmap_lives = [] of Value
 
   def alloca(name : String, type : Type) : Value
-    ltype = type.is_a?(Type::VaListType) ? builder.valist_llvm_type : llvm_type(type)
-    raw = @llvm_builder.alloca(ltype, name)
-    slot = wrap_ref(raw, type, Value::PP::LocalUninitialized.new(name))
+    slot = previous_def
     if builder.gc_safepoints && type.gc_pointer?
-      inst = @llvm_builder.store(ltype.null, raw)
+      inst = @llvm_builder.store(llvm_type(type).null, llvm_val(slot))
       inst.volatile = true
     end
     slot
   end
 
   def load_ref(value : Value) : Value
-    if value.type.is_a?(Type::VaListType)
-      value
+    if builder.gc_safepoints && value.type.gc_pointer?
+      wrap_val(@llvm_builder.load_volatile(llvm_type(value), llvm_val(value)), value.type, value.pp)
     else
-      llvm = if builder.gc_safepoints && value.type.gc_pointer?
-               @llvm_builder.load_volatile(llvm_type(value), llvm_val(value))
-             else
-               @llvm_builder.load(llvm_type(value), llvm_val(value))
-             end
-      wrap_val(llvm, value.type, value.pp)
+      previous_def
     end
   end
 
@@ -43,13 +29,9 @@ class Myc::Backend::Llvm::BB < Myc::Backend::AbstractBB
         return wrapped
       end
     end
-    link = builder.func_link(name, type_fn)
-    vals = args.map { |arg| llvm_val(arg) }
-    val = @llvm_builder.call(link.llvm_type, link.llvm_function, vals)
+    result = previous_def
     emit_gc_reg_clobber(name)
-    unless type_fn.ret.eq?(func_def.mod.typer.void)
-      wrap_val(val, type_fn.ret, Value::PP::CallResult.new(name))
-    end
+    result
   end
 
   def gc_set_stackmap_lives(lives : Array(Value))
@@ -83,26 +65,17 @@ class Myc::Backend::Llvm::BB < Myc::Backend::AbstractBB
         return wrapped
       end
     end
-    vals = args.map { |arg| llvm_val(arg) }
-    llvm_function = LLVM::Function.new(llvm_val(fn).to_unsafe)
-    val = @llvm_builder.call(fn_signature(type_fn), llvm_function, vals)
+    result = previous_def
     emit_gc_reg_clobber(nil)
-
-    unless type_fn.ret.eq?(func_def.mod.typer.void)
-      wrap_val(val, type_fn.ret, Value::PP::CallResult.new("invoke"))
-    end
+    result
   end
 
+  # kostya/myc#10: do not copy va_copy. previous_def is myc's store;
+  # mark the LLVM store volatile when the slot is a GC pointer.
   def store(lhs : Value, rhs : Value)
-    if lhs.type.is_a?(Type::VaListType)
-      lhs = wrap_val(llvm_val(lhs), lhs.type.to_unsafe_ptr, lhs.pp)
-      rhs = wrap_val(llvm_val(rhs), rhs.type.to_unsafe_ptr, rhs.pp)
-      intrinsic_call("llvm.va_copy.p0", typer.void, [lhs, rhs])
-    else
-      inst = @llvm_builder.store(llvm_val(rhs), llvm_val(lhs))
-      if builder.gc_safepoints && lhs.type.gc_pointer?
-        inst.volatile = true
-      end
+    inst = previous_def
+    if builder.gc_safepoints && lhs.type.gc_pointer? && inst.is_a?(LLVM::Value)
+      inst.volatile = true
     end
   end
 
@@ -211,50 +184,5 @@ class Myc::Backend::Llvm::BB < Myc::Backend::AbstractBB
       return true if f.leaf?
     end
     false
-  end
-
-  private def builder
-    @builder.as(Builder)
-  end
-
-  private def llvm_val(value : Value) : LLVM::Value
-    value.bbval.as(BBVal).llvm
-  end
-
-  private def llvm_type(value : Value) : LLVM::Type
-    llvm_type(value.type)
-  end
-
-  private def llvm_type(t : Type) : LLVM::Type
-    builder.llvm_type(t)
-  end
-
-  private def wrap_val(llvm : LLVM::Value, type : Type, pp : Value::PP) : Value
-    Value.new(BBVal.new(llvm), type, Value::MM::Val, pp)
-  end
-
-  private def wrap_ref(llvm : LLVM::Value, type : Type, pp : Value::PP) : Value
-    Value.new(BBVal.new(llvm), type, Value::MM::Ref, pp)
-  end
-
-  private def typer : Typer
-    @func_def.mod.typer
-  end
-
-  private def fn_signature(type_fn : Type::Fn) : LLVM::Type
-    arg_types = type_fn.args.map { |t| llvm_type(t) }
-    ret_type = llvm_type(type_fn.ret)
-    LLVM::Type.function(arg_types, ret_type, type_fn.vaarg)
-  end
-
-  private def intrinsic_link(name : String, ret_type : Type, arg_types : Array(Type)) : FuncLink
-    type_fn = Type::Fn.new(Location.new("", 0), arg_types, ret_type)
-    builder.func_link(name, type_fn)
-  end
-
-  private def intrinsic_call(name : String, ret_type : Type, args : Array(Value)) : LLVM::Value
-    arg_types = args.map { |a| a.type }
-    link = intrinsic_link(name, ret_type, arg_types)
-    @llvm_builder.call(link.llvm_type, link.llvm_function, args.map { |a| llvm_val(a) })
   end
 end

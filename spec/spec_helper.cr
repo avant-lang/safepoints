@@ -1,6 +1,4 @@
 require "spec"
-require "myc"
-require "../lib/myc/src/backend/llvm/all"
 require "../src/myc_llvm_safepoints"
 
 ENV["MYC_SPEC"] = "1"

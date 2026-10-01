@@ -40,7 +40,7 @@ dependencies:
 require "myc_llvm_safepoints"
 ```
 
-`require "myc"` plus myc’s LLVM backend must already be loaded. This shard reopens those classes; it does not vendor myc.
+`require "myc_llvm_safepoints"` loads myc’s LLVM backend and then reopens those classes. It does not vendor myc. Overrides use Crystal `previous_def` and extra instance variables so myc can change its methods without this shard copying them (kostya/myc#10).
 
 Then `crystal build src/cli/llvm.cr -o myc-llvm` as usual.
 
