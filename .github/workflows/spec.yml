@@ -1,0 +1,42 @@
+# shards install + crystal spec on push and PR. Optional myc-llvm link check.
+# Crystal ≥ 1.19, LLVM ≥ 15. This tree pins Crystal 1.21 and LLVM 20 (same as avant).
+
+name: spec
+
+"on":
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: spec-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  spec:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      LLVM_CONFIG: llvm-config-20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM 20
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential llvm-20-dev
+
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: "1.21"
+
+      - name: Install shards
+        run: shards install
+
+      - name: crystal spec
+        run: crystal spec
+
+      - name: Link myc-llvm
+        run: crystal build src/cli.cr -o myc-llvm
