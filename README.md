@@ -84,6 +84,8 @@ QBE and C backends are not loaded by this CLI; they stay stock myc.
 crystal spec
 ```
 
+GitHub Actions (`.github/workflows/spec.yml`) runs that plus `crystal build src/cli.cr -o myc-llvm` on push and PR (Ubuntu 24.04, Crystal 1.21, LLVM 20).
+
 - `gc.statepoint` when `gc_root` is declared, and not without it
 - `--gc-root` and `--no-gc-safepoints`
 - `--gc-leaf` skips the statepoint
