@@ -1,6 +1,6 @@
 # myc_llvm_safepoints changelog
 
-## Unreleased
+## 0.2.0 - 2026-10-02
 
 ### Fixed
 
