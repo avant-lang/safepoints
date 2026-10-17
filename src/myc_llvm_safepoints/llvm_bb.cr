@@ -3,7 +3,7 @@ class Myc::Backend::Llvm::BB < Myc::Backend::AbstractBB
 
   def alloca(name : String, type : Type) : Value
     slot = previous_def
-    if builder.gc_safepoints && type.gc_pointer?
+    if gc_slot_is_volatile?(type)
       inst = @llvm_builder.store(llvm_type(type).null, llvm_val(slot))
       inst.volatile = true
     end
@@ -17,7 +17,7 @@ class Myc::Backend::Llvm::BB < Myc::Backend::AbstractBB
     if shared_flag?(value)
       return wrap_val(@llvm_builder.load_volatile(llvm_type(value), llvm_val(value)), value.type, value.pp)
     end
-    if builder.gc_safepoints && value.type.gc_pointer?
+    if gc_slot_is_volatile?(value.type)
       wrap_val(@llvm_builder.load_volatile(llvm_type(value), llvm_val(value)), value.type, value.pp)
     else
       previous_def
@@ -80,9 +80,28 @@ class Myc::Backend::Llvm::BB < Myc::Backend::AbstractBB
   # mark the LLVM store volatile when the slot is a GC pointer.
   def store(lhs : Value, rhs : Value)
     inst = previous_def
-    if builder.gc_safepoints && lhs.type.gc_pointer? && inst.is_a?(LLVM::Value)
+    if gc_slot_is_volatile?(lhs.type) && inst.is_a?(LLVM::Value)
       inst.volatile = true
     end
+  end
+
+  # The alloca block is the function entry. finish() appends its branch
+  # after the visitor, so a root call appended here runs once. If that
+  # block already has a terminator, appending would be dead; plant the
+  # call before the branch instead.
+  def gc_insert_before_terminator
+    term = LibLLVM.get_basic_block_terminator(@llvm_bb.to_unsafe)
+    return if term.null?
+    LibLLVM.position_builder_before(@llvm_builder.to_unsafe, term)
+  end
+
+  # A --gc-leaf function cannot collect, so a pointer slot is not a
+  # moving root while it runs. Volatile loads would keep the slot on
+  # the hot path and block register promotion.
+  private def gc_slot_is_volatile?(type : Type) : Bool
+    return false unless builder.gc_safepoints
+    return false unless type.gc_pointer?
+    !builder.gc_config.leaf?(func_def.name)
   end
 
   private def emit_gc_reg_clobber(name : String?) : Nil

@@ -1,5 +1,7 @@
 lib LibLLVM
   fun build_addr_space_cast = LLVMBuildAddrSpaceCast(BuilderRef, val : ValueRef, dest_ty : TypeRef, name : Char*) : ValueRef
+  fun get_basic_block_terminator = LLVMGetBasicBlockTerminator(bb : BasicBlockRef) : ValueRef
+  fun position_builder_before = LLVMPositionBuilderBefore(builder : BuilderRef, instr : ValueRef)
   fun lookup_intrinsic_id = LLVMLookupIntrinsicID(name : Char*, name_len : SizeT) : UInt
   fun get_intrinsic_declaration = LLVMGetIntrinsicDeclaration(mod : ModuleRef, id : UInt, param_types : TypeRef*, param_count : SizeT) : ValueRef
   fun intrinsic_get_type = LLVMIntrinsicGetType(ctx : ContextRef, id : UInt, param_types : TypeRef*, param_count : SizeT) : TypeRef

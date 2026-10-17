@@ -166,8 +166,18 @@ abstract class Myc::Backend::AbstractVisitor
     @bb = @func.alloca_bb
     ptrs = [] of Value
     collect_pointer_slots_in_entry(ref, ptrs)
-    @bb = saved
+    # The slot address is computed in the alloca block. The call itself
+    # has to run after avant_gc_enter, which is the first body instruction.
+    # The first safepoint is often the loop, and that block is where the
+    # call used to be planted. The body block is usually already branched
+    # into the loop, so the call goes in before that branch.
+    body = @func.body_bb
+    @bb = body
+    if body.is_a?(Myc::Backend::Llvm::BB)
+      body.gc_insert_before_terminator
+    end
     ptrs.each { |slot| register_one_gc_root(slot) }
+    @bb = saved
   end
 
   private def collect_pointer_slots_in_entry(ref : Value, ptrs : Array(Value))

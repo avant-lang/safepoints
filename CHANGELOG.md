@@ -1,5 +1,11 @@
 # myc_llvm_safepoints changelog
 
+## 0.3.0 - 2026-10-17
+
+### Changed
+
+* Updated `myc` to tag `v0.11.0` and version string of `v0.12.0-dev`. All tests passing.
+
 ## 0.2.0 - 2026-10-02
 
 ### Fixed
