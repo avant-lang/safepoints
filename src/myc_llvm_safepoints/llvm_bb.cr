@@ -11,6 +11,12 @@ class Myc::Backend::Llvm::BB < Myc::Backend::AbstractBB
   end
 
   def load_ref(value : Value) : Value
+    # g_avant_shared is stored by another thread when it registers.
+    # A plain load is lifted out of a loop, and the loop then keeps a
+    # raw buffer after a moving collection. A volatile load stays put.
+    if shared_flag?(value)
+      return wrap_val(@llvm_builder.load_volatile(llvm_type(value), llvm_val(value)), value.type, value.pp)
+    end
     if builder.gc_safepoints && value.type.gc_pointer?
       wrap_val(@llvm_builder.load_volatile(llvm_type(value), llvm_val(value)), value.type, value.pp)
     else
@@ -176,6 +182,15 @@ class Myc::Backend::Llvm::BB < Myc::Backend::AbstractBB
       refs.to_unsafe.as(LibLLVM::TypeRef*), refs.size
     )
     {LLVM::Function.new(fnv), LLVM::Type.new(fty)}
+  end
+
+  private def shared_flag?(value : Value) : Bool
+    case pp = value.pp
+    when Value::PP::Global
+      pp.name == "g_avant_shared"
+    else
+      false
+    end
   end
 
   private def gc_callee_is_leaf?(name : String) : Bool
