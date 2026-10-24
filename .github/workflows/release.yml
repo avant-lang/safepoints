@@ -1,0 +1,119 @@
+# On a version tag: crystal spec, then a --release myc-llvm,
+# then a draft GitHub Release with the linux-x86_64 binary.
+#
+# Crystal 1.21 and LLVM 20 match spec.yml. The binary is dynamically
+# linked to libLLVM-20. A consumer installs LLVM 20; it does not
+# rebuild this shard.
+#
+# The asset is `myc-llvm-linux-x86_64.tar.gz`. Inside it, the binary
+# is `myc-llvm-linux-x86_64/myc-llvm`.
+#
+# Spec runs before any release is created. A new tag becomes a draft
+# (`gh release create --draft`). Publishing the draft is a separate
+# act. Git tags cannot hold files. Drafts are not "latest".
+#
+# Backfill an existing tag from Actions: Run workflow → tag name.
+# An existing release is uploaded in place; it is not flipped to draft.
+
+name: release-binary
+
+"on":
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and attach
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-binary-${{ github.event.inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  binary:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      LLVM_CONFIG: llvm-config-20
+      TAG_NAME: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install LLVM 20
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential llvm-20-dev
+
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: "1.21"
+
+      - name: Install shards
+        run: shards install
+
+      - name: crystal spec
+        run: crystal spec
+
+      - name: Build myc-llvm
+        run: |
+          set -euo pipefail
+          crystal build src/cli.cr --release -o myc-llvm
+          ./myc-llvm version
+
+      - name: Package linux-x86_64
+        run: |
+          set -euo pipefail
+          mkdir -p dist/myc-llvm-linux-x86_64
+          cp -f myc-llvm dist/myc-llvm-linux-x86_64/myc-llvm
+          chmod +x dist/myc-llvm-linux-x86_64/myc-llvm
+          {
+            echo "tag: ${TAG_NAME}"
+            echo "safepoints: $(git rev-parse HEAD)"
+            echo "myc: $(./myc-llvm version)"
+            echo "crystal: $(crystal --version)"
+            echo "llvm: $(llvm-config-20 --version)"
+            echo "runner: ubuntu-24.04 linux-x86_64"
+            echo "build: crystal build src/cli.cr --release -o myc-llvm"
+            echo "binary: myc-llvm"
+          } | tee dist/myc-llvm-linux-x86_64/versions.txt dist/versions.txt
+          tar -C dist -czf dist/myc-llvm-linux-x86_64.tar.gz myc-llvm-linux-x86_64
+          sha256sum dist/myc-llvm-linux-x86_64.tar.gz | tee dist/myc-llvm-linux-x86_64.tar.gz.sha256
+          {
+            echo "linux-x86_64 \`myc-llvm\` with pointer safepoints."
+            echo
+            echo "Built with Crystal 1.21 and LLVM 20 (\`--release\`). The binary links libLLVM-20. This asset is the backend a consumer runs; the consumer does not install Crystal and does not compile this shard."
+            echo
+            cat dist/versions.txt
+            echo
+            echo '```'
+            cat dist/myc-llvm-linux-x86_64.tar.gz.sha256
+            echo '```'
+          } > dist/notes.md
+
+      - name: Attach to GitHub Release for the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
+            gh release upload "${TAG_NAME}" \
+              dist/myc-llvm-linux-x86_64.tar.gz \
+              dist/myc-llvm-linux-x86_64.tar.gz.sha256 \
+              --clobber
+          else
+            gh release create "${TAG_NAME}" \
+              dist/myc-llvm-linux-x86_64.tar.gz \
+              dist/myc-llvm-linux-x86_64.tar.gz.sha256 \
+              --title "${TAG_NAME}" \
+              --notes-file dist/notes.md \
+              --draft \
+              --verify-tag
+          fi

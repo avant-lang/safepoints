@@ -1,5 +1,19 @@
 # myc_llvm_safepoints changelog
 
+## 0.4.0 - 2026-10-24
+
+### Changed
+
+* A `--gc-leaf` function no longer gets safepoint lowering. Calls inside it do not plant `avant_gc_root`, a statepoint, a reload, or a register clobber. The function does not collect, and its callees do not, so those roots were recording pointers that cannot move. A function that is not a leaf still roots every pointer result, including the result of a leaf callee.
+* A `--gc-leaf` function whose body is in this module fails the build if it calls a non-leaf. The non-allocating string and buffer helpers may be called from a leaf frame. They are not leaves for any other caller, so a non-leaf still statepoints them.
+* An indirect call of a known `--gc-leaf` function is not a statepoint. An unknown function pointer still is.
+* A spill slot that is not also a local, a parameter, or a live stack value is left out of that statepoint's `gc-live` bundle.
+* A `--gc-leaf` callee is marked `nounwind` and `willreturn`. `nosync` is added as well, except on libc leaves and on names that take a lock or allocate.
+
+### Added
+
+* `.github/workflows/release.yml` builds `myc-llvm` (`crystal build --release`) on a `v*` tag and attaches `myc-llvm-linux-x86_64.tar.gz` to a draft GitHub Release. `crystal spec` runs before the release exists.
+
 ## 0.3.0 - 2026-10-17
 
 ### Changed
