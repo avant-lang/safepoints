@@ -7,6 +7,19 @@ abstract class Myc::Backend::AbstractVisitor
   @gc_seen_locals = Set(String).new
 
   def visit(op : Opcode::Call)
+    # This frame is --gc-leaf. It does not collect, and its callees do
+    # not. Rooting each pointer result planted avant_gc_root here for
+    # pointers that cannot move. A frame that is not a leaf still roots
+    # below.
+    if gc_safepoints? && builder.gc_config.leaf?(func_def.name)
+      # runtime_leaves do not allocate. They are not --gc-leaf: a
+      # non-leaf caller still statepoints them. A leaf frame does not.
+      if gc_call_may_collect?(op.name) && !Myc::Backend::GcConfig.runtime_leaves.includes?(op.name)
+        raise error("gc safepoint: --gc-leaf #{func_def.name} calls #{op.name}, which can collect")
+      end
+      previous_def
+      return
+    end
     type_fn = find_func_type_fn(op.name)
     gc_safepoint_before_call(op.name)
     if gc_safepoints? && gc_call_may_collect?(op.name)
@@ -22,8 +35,12 @@ abstract class Myc::Backend::AbstractVisitor
   end
 
   def visit(op : Opcode::Invoke)
-    gc_safepoint_before_call(nil)
-    if gc_safepoints?
+    target = invoke_leaf_target
+    if gc_safepoints? && builder.gc_config.leaf?(func_def.name) && target.nil?
+      raise error("gc safepoint: --gc-leaf #{func_def.name} uses an indirect call, which can collect")
+    end
+    gc_safepoint_before_call(target)
+    if gc_safepoints? && (target.nil? || gc_call_may_collect?(target))
       @bb.gc_set_stackmap_lives(gc_collect_stackmap_lives)
     end
     ret_void = true
@@ -35,9 +52,23 @@ abstract class Myc::Backend::AbstractVisitor
     end
     previous_def
     unless ret_void
-      @stack[@stack.size - 1] = gc_root_call_result(@stack.last)
+      if target.nil? || gc_call_may_collect?(target)
+        @stack[@stack.size - 1] = gc_root_call_result(@stack.last)
+      end
     end
-    gc_safepoint_reload_after(nil)
+    gc_safepoint_reload_after(target)
+  end
+
+  # The function pointer is the last value pushed. A direct address of a
+  # --gc-leaf function does not collect. A local or an unknown pointer does.
+  private def invoke_leaf_target : String?
+    return nil if @stack.empty?
+    case pp = @stack.last.pp
+    when Value::PP::FnAddress
+      pp.name if builder.gc_config.leaf?(pp.name)
+    else
+      nil
+    end
   end
 
   private def gc_safepoints?
@@ -76,9 +107,22 @@ abstract class Myc::Backend::AbstractVisitor
   end
 
   private def gc_collect_stackmap_lives : Array(Value)
+    # Spill slots exist only to hold a stack temporary across a call.
+    # Once nothing on the stack, in a local, or in a parameter still
+    # names that slot, it is dead. Aggregate field roots are not spills,
+    # so they stay.
+    spills = Set(UInt64).new
+    @gc_spill.each_value { |slot| spills << slot.object_id }
+    active = Set(UInt64).new
+    @locals.each_value { |v| active << v.object_id }
+    @params.each { |v| active << v.object_id }
+    @stack.each { |v| active << v.object_id }
     lives = [] of Value
     @gc_root_slots.each do |slot|
       next unless slot.type.is_a?(Type::PtrType)
+      if spills.includes?(slot.object_id) && !active.includes?(slot.object_id)
+        next
+      end
       lives << slot
     end
     lives

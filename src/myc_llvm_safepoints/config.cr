@@ -8,13 +8,47 @@ class Myc::Backend::GcConfig
   property enter : String = ""
   property leave : String = ""
   property leaves : Set(String)
+  # FastISel is a target-machine switch, not a per-function one. It stays
+  # off for the module when any function can collect. A module with no
+  # statepoint keeps it.
+  property fast_isel_off : Bool = false
 
   def self.libc_leaves : Set(String)
     Set{"printf", "memset", "memcpy", "memmove", "malloc", "calloc", "free"}
   end
 
+  # Avant lowers these from fields. They do not allocate, so a quiet
+  # leaf may call them even when the frontend forgot to name them.
+  def self.runtime_leaves : Set(String)
+    Set{
+      "avant_str_size", "avant_str_byte", "avant_str_eq",
+      "avant_str_to_f", "avant_str_to_i", "avant_str_to_f_slice",
+      "avant_checksum_str", "avant_checksum_f64",
+      "avant_buf_size", "avant_buf_starts",
+      "avant_wide_op", "avant_wide_hi",
+      "avant_now_ms", "avant_now_us",
+      "avant_hash_size",
+    }
+  end
+
   def initialize
     @leaves = self.class.libc_leaves.dup
+  end
+
+  # True when this function's own body can reach a moving call.
+  # A --gc-leaf frame cannot. An indirect call can.
+  def function_collects?(func_def) : Bool
+    return false if leaf?(func_def.name)
+    hit = false
+    func_def.deep_walk do |op|
+      case op
+      when Opcode::Call
+        hit = true unless leaf?(op.name)
+      when Opcode::Invoke
+        hit = true
+      end
+    end
+    hit
   end
 
   def leaf?(name : String) : Bool

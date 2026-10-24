@@ -1,5 +1,6 @@
 class Myc::Backend::Llvm::BB < Myc::Backend::AbstractBB
   @gc_stackmap_lives = [] of Value
+  @gc_tagged_leaves = Set(String).new
 
   def alloca(name : String, type : Type) : Value
     slot = previous_def
@@ -25,6 +26,7 @@ class Myc::Backend::Llvm::BB < Myc::Backend::AbstractBB
   end
 
   def call(name : String, type_fn : Type::Fn, args : Array(Value)) : Value?
+    tag_gc_leaf(name, type_fn)
     lives = take_gc_stackmap_lives
     if !lives.empty?
       link = builder.func_link(name, type_fn)
@@ -45,6 +47,8 @@ class Myc::Backend::Llvm::BB < Myc::Backend::AbstractBB
   end
 
   def gc_reload_root_slots(slots : Array(Value))
+    # Removing this reload slowed Matmul, Brainfuck, GameOfLife, and the
+    # templates. The noinline call stays.
     return unless builder.gc_safepoints
     return if slots.empty?
     reload = builder.gc_config.reload
@@ -99,12 +103,17 @@ class Myc::Backend::Llvm::BB < Myc::Backend::AbstractBB
   # moving root while it runs. Volatile loads would keep the slot on
   # the hot path and block register promotion.
   private def gc_slot_is_volatile?(type : Type) : Bool
+    # Dropping volatile slowed Sieve, the templates, the mazes, and the
+    # interpreter. Non-leaf pointer slots stay volatile. g_avant_shared
+    # is handled in load_ref.
     return false unless builder.gc_safepoints
     return false unless type.gc_pointer?
     !builder.gc_config.leaf?(func_def.name)
   end
 
   private def emit_gc_reg_clobber(name : String?) : Nil
+    # Dropping this clobber slowed Matmul::T8, Matmul::T16, and
+    # Brainfuck::Recursion. Callee-saved registers still need the barrier.
     return unless builder.gc_safepoints
     return if name && gc_callee_is_leaf?(name)
     return unless builder.layout.target.triple.includes?("x86_64")
@@ -210,6 +219,22 @@ class Myc::Backend::Llvm::BB < Myc::Backend::AbstractBB
     else
       false
     end
+  end
+
+  # nounwind and willreturn let LLVM move a leaf call. nosync does not
+  # apply to malloc or to a hook that takes a lock, so libc leaves are
+  # left alone. avant_barrier and avant_pin can lock; they stay nosync-free.
+  private def tag_gc_leaf(name : String, type_fn : Type::Fn) : Nil
+    return unless builder.gc_safepoints
+    return unless gc_callee_is_leaf?(name)
+    return if Myc::Backend::GcConfig.libc_leaves.includes?(name)
+    return if @gc_tagged_leaves.includes?(name)
+    @gc_tagged_leaves << name
+    fn = builder.func_link(name, type_fn).llvm_function
+    fn.add_attribute LLVM::Attribute::NoUnwind
+    fn.add_attribute LLVM::Attribute::WillReturn
+    return if name.includes?("barrier") || name.includes?("pin") || name.includes?("alloc")
+    fn.add_attribute LLVM::Attribute::NoSync
   end
 
   private def gc_callee_is_leaf?(name : String) : Bool

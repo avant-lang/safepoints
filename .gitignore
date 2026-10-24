@@ -2,3 +2,6 @@
 /.shards/
 /myc-llvm
 *.dwarf
+
+# Improvements data are local
+IMPROVEMENTS.md

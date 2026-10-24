@@ -9,6 +9,9 @@ class Myc::Backend::Llvm::Backend < Myc::Backend::AbstractBackend
           previous_def.as(Builder)
         end
     if cfg = @pending_gc_config
+      # FastISel is per target machine. A module that contains any
+      # statepoint must keep it off. Turning it on regressed Brainfuck
+      # and the templates, so an enabled GC config always disables it.
       b.disable_fast_isel! if cfg.enabled
       b.gc_config = cfg
     end
