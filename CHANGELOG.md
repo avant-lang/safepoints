@@ -1,5 +1,14 @@
 # myc_llvm_safepoints changelog
 
+## 0.5.0 - 2026-10-24
+
+### Changed
+
+* Batched root registration and inline reload.
+* Registration defers to function finish: one `gc_root_begin` call right after gc-enter publishes the slot count, then plain stores at fixed indices.
+* Reload is an inline volatile load/store for live slots only.
+* `MYC_GC_ROOT_BATCH=0` and `MYC_GC_INLINE_RELOAD=0` restore the old calls.
+
 ## 0.4.0 - 2026-10-24
 
 ### Changed
