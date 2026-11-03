@@ -169,15 +169,24 @@ abstract class Myc::Backend::AbstractVisitor
     saved = @bb
     body = @func.body_bb
     @bb = body
-    if body.is_a?(Myc::Backend::Llvm::BB)
-      body.gc_position_after_first_instruction
-    end
     if type_fn = find_func_type_fn(builder.gc_config.begin)
       ptr_slots = @gc_root_slots.select { |slot| slot.type.is_a?(Type::PtrType) }
-      @bb.gc_root_batch(ptr_slots, builder.gc_config.begin, type_fn) unless ptr_slots.empty?
+      unless ptr_slots.empty?
+        if body.is_a?(Myc::Backend::Llvm::BB)
+          # Emitted on a dedicated builder: this BB's own builder is
+          # where Func#finish is about to append the jump to the
+          # return block, and moving it corrupts that terminator.
+          body.gc_root_batch_at_entry(ptr_slots, builder.gc_config.begin, type_fn)
+        else
+          @gc_root_slots.each { |slot| emit_one_gc_root(slot) }
+        end
+      end
     else
       # A module that does not declare the batch entry keeps the
       # per-slot calls, emitted here at the same entry position.
+      if body.is_a?(Myc::Backend::Llvm::BB)
+        body.gc_insert_before_terminator
+      end
       @gc_root_slots.each { |slot| emit_one_gc_root(slot) }
     end
     @bb = saved
@@ -250,12 +259,13 @@ abstract class Myc::Backend::AbstractVisitor
     collect_pointer_slots_in_entry(ref, ptrs)
     # The slot address is computed in the alloca block. Registration
     # itself has to run after avant_gc_enter, which is the first body
-    # instruction, and before any collecting call in that block, so it
-    # is planted right after that first instruction.
+    # instruction. In batch mode nothing is emitted here (the batch
+    # lands at function finish), so the body builder is left alone:
+    # moving it mid-walk would reorder the instructions that follow.
     body = @func.body_bb
     @bb = body
-    if body.is_a?(Myc::Backend::Llvm::BB)
-      body.gc_position_after_first_instruction
+    if body.is_a?(Myc::Backend::Llvm::BB) && !gc_batch_roots?
+      body.gc_insert_before_terminator
     end
     ptrs.each { |slot| register_one_gc_root(slot) }
     @bb = saved
