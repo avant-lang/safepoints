@@ -6,6 +6,7 @@ abstract class Myc::Backend::AbstractBackend
   protected def gc_config_from_cli : GcConfig
     cfg = GcConfig.new
     cfg.root = data.options["gc-root"]? || ENV["MYC_GC_ROOT"]? || "gc_root"
+    cfg.begin = data.options["gc-root-begin"]? || ENV["MYC_GC_ROOT_BEGIN"]? || "#{cfg.root}_begin"
     cfg.reload = data.options["gc-reload"]? || ENV["MYC_GC_RELOAD"]? || "gc_reload"
     cfg.enter = data.options["gc-enter"]? || ENV["MYC_GC_ENTER"]? || ""
     cfg.leave = data.options["gc-leave"]? || ENV["MYC_GC_LEAVE"]? || ""

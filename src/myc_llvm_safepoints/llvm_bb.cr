@@ -46,21 +46,50 @@ class Myc::Backend::Llvm::BB < Myc::Backend::AbstractBB
     @gc_stackmap_lives = lives
   end
 
-  def gc_reload_root_slots(slots : Array(Value))
-    # Removing this reload slowed Matmul, Brainfuck, GameOfLife, and the
-    # templates. The noinline call stays.
+  # One avant_gc_root_begin call publishes the frame's whole slot list;
+  # each slot address is then a plain store at its fixed index. The
+  # runtime array is sized by that call, so no capacity check belongs
+  # here. Emitted once per function at entry (from visitor finish).
+  def gc_root_batch(slots : Array(Value), begin_name : String, type_fn : Type::Fn)
     return unless builder.gc_safepoints
     return if slots.empty?
-    reload = builder.gc_config.reload
-    return if reload.empty?
-    voidp = func_def.mod.typer.voidp
-    type_fn = Type::Fn.new(Location.new("", 0), [voidp], voidp)
-    link = builder.func_link(reload, type_fn)
-    link.llvm_function.add_attribute LLVM::Attribute::NoInline
+    link = builder.func_link(begin_name, type_fn)
+    ctx = builder.context
+    count = ctx.int32.const_int(slots.size)
+    base = @llvm_builder.call(link.llvm_type, link.llvm_function, [count])
+    slots.each_with_index do |slot, i|
+      dest = @llvm_builder.inbounds_gep(ctx.pointer, base, ctx.int32.const_int(i))
+      @llvm_builder.store(llvm_val(slot), dest)
+    end
+  end
+
+  def gc_reload_root_slots(slots : Array(Value))
+    # Removing this reload slowed Matmul, Brainfuck, GameOfLife, and the
+    # templates. The volatile load/store stays; Collector II Wave 0
+    # emits it inline instead of paying a noinline call per slot.
+    # MYC_GC_INLINE_RELOAD=0 restores the call for A/B measurement.
+    return unless builder.gc_safepoints
+    return if slots.empty?
+    if ENV["MYC_GC_INLINE_RELOAD"]? == "0"
+      reload = builder.gc_config.reload
+      return if reload.empty?
+      voidp = func_def.mod.typer.voidp
+      type_fn = Type::Fn.new(Location.new("", 0), [voidp], voidp)
+      link = builder.func_link(reload, type_fn)
+      link.llvm_function.add_attribute LLVM::Attribute::NoInline
+      slots.each do |slot|
+        next unless slot.type.is_a?(Type::PtrType)
+        addr = llvm_val(slot)
+        loaded = @llvm_builder.call(link.llvm_type, link.llvm_function, [addr])
+        inst = @llvm_builder.store(loaded, addr)
+        inst.volatile = true
+      end
+      return
+    end
     slots.each do |slot|
       next unless slot.type.is_a?(Type::PtrType)
       addr = llvm_val(slot)
-      loaded = @llvm_builder.call(link.llvm_type, link.llvm_function, [addr])
+      loaded = @llvm_builder.load_volatile(llvm_type(slot), addr)
       inst = @llvm_builder.store(loaded, addr)
       inst.volatile = true
     end
@@ -97,6 +126,21 @@ class Myc::Backend::Llvm::BB < Myc::Backend::AbstractBB
     term = LibLLVM.get_basic_block_terminator(@llvm_bb.to_unsafe)
     return if term.null?
     LibLLVM.position_builder_before(@llvm_builder.to_unsafe, term)
+  end
+
+  # Position this block's builder right after its first instruction.
+  # Root registration must run after avant_gc_enter, which the frontend
+  # emits first in the body block, and before any collecting call the
+  # same block may contain (a straight-line function is one block).
+  def gc_position_after_first_instruction
+    first = LibLLVM.get_first_instruction(@llvm_bb.to_unsafe)
+    return if first.null?
+    nxt = LibLLVM.get_next_instruction(first)
+    if nxt.null?
+      @llvm_builder.position_at_end(@llvm_bb)
+    else
+      LibLLVM.position_builder_before(@llvm_builder.to_unsafe, nxt)
+    end
   end
 
   # A --gc-leaf function cannot collect, so a pointer slot is not a
