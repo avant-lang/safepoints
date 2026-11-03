@@ -9,4 +9,11 @@ class Myc::Backend::Llvm::Func < Myc::Backend::AbstractFunc
       @link.llvm_function.gc = "statepoint-example"
     end
   end
+
+  def finish(v : AbstractVisitor)
+    # Root registration is emitted here, once the visitor knows every
+    # slot this frame will root, and lands in the entry block.
+    v.gc_flush_root_batch
+    previous_def
+  end
 end

@@ -26,6 +26,29 @@ class Myc::Backend::Llvm::BB < Myc::Backend::AbstractBB
   end
 
   def call(name : String, type_fn : Type::Fn, args : Array(Value)) : Value?
+    # Collector II Wave 1: the barrier's common case (a young or
+    # already-remembered heap target) is a flag test on the header.
+    # Emit it inline and keep the call for everything else.
+    # MYC_GC_INLINE_BARRIER=0 restores the call for A/B measurement.
+    if name == "avant_barrier" && builder.gc_safepoints &&
+       ENV["MYC_GC_INLINE_BARRIER"]? != "0" && args.size == 1
+      gc_barrier_inline(name, type_fn, args[0])
+      return nil
+    end
+    # Collector II Wave 1: a nursery allocation whose fast conditions
+    # the runtime published (avant_gc_fast_ok) is a bump, a header
+    # store, a payload memset, a start bit, and three counter adds in
+    # generated code. The slow block is the ordinary call, statepoint
+    # wrapped exactly as below. MYC_GC_INLINE_ALLOC=0 restores the
+    # call for A/B measurement.
+    if (name == "avant_alloc" || name == "avant_bump_alloc") && builder.gc_safepoints &&
+       ENV["MYC_GC_INLINE_ALLOC"]? != "0" && args.size == 2 && !type_fn.ret.needs_blit?
+      lives = take_gc_stackmap_lives
+      if v = gc_alloc_inline(name, type_fn, args, lives)
+        return v
+      end
+      @gc_stackmap_lives = lives
+    end
     tag_gc_leaf(name, type_fn)
     lives = take_gc_stackmap_lives
     if !lives.empty?
@@ -46,21 +69,190 @@ class Myc::Backend::Llvm::BB < Myc::Backend::AbstractBB
     @gc_stackmap_lives = lives
   end
 
-  def gc_reload_root_slots(slots : Array(Value))
-    # Removing this reload slowed Matmul, Brainfuck, GameOfLife, and the
-    # templates. The noinline call stays.
+  private def gc_extern(name : String, type : LLVM::Type, tls : Bool) : LLVM::Value
+    mod = builder.llvm_mod
+    if g = mod.globals[name]?
+      return g
+    end
+    g = mod.globals.add(type, name)
+    g.thread_local = true if tls
+    g
+  end
+
+  private def gc_add_total(b : LLVM::Builder, ptr : LLVM::Value, delta : LLVM::Value)
+    ctx = builder.context
+    old = b.load(ctx.int64, ptr)
+    b.store(b.add(old, delta), ptr)
+  end
+
+  # Returns the phi Value for the allocation, or nil before emitting
+  # anything when the inline form does not apply. Header layout and
+  # flag values are the ABI documented in avant_rt.h.
+  private def gc_alloc_inline(name : String, type_fn : Type::Fn, args : Array(Value), lives : Array(Value)) : Value?
+    ctx = builder.context
+    pair = llvm_intrinsic("llvm.memset", [ctx.pointer, ctx.int64])
+    return nil unless pair
+    ms_fn, ms_ty = pair
+    fn = @func.as(Myc::Backend::Llvm::Func).link.llvm_function
+    fast_bb = fn.basic_blocks.append "alloc_fast"
+    slow_bb = fn.basic_blocks.append "alloc_slow"
+    cont_bb = fn.basic_blocks.append "alloc_cont"
+    b = @llvm_builder
+    size_ll = llvm_val(args[0])
+    type_ll = llvm_val(args[1])
+    total = b.and(b.add(size_ll, ctx.int64.const_int(15)), ctx.int64.const_int(-8))
+    shared = b.load(ctx.int32, gc_extern("g_avant_shared", ctx.int32, false))
+    c_shared = b.icmp(LLVM::IntPredicate::EQ, shared, ctx.int32.const_int(0))
+    fast_ok = b.load(ctx.int32, gc_extern("avant_gc_fast_ok", ctx.int32, true))
+    c_ok = b.icmp(LLVM::IntPredicate::EQ, fast_ok, ctx.int32.const_int(1))
+    bump_g = gc_extern("avant_gc_bump", ctx.pointer, true)
+    bump = b.load(ctx.pointer, bump_g)
+    limit = b.load(ctx.pointer, gc_extern("avant_gc_limit", ctx.pointer, true))
+    new_bump = b.inbounds_gep(ctx.int8, bump, total)
+    c_fit = b.and(
+      b.icmp(LLVM::IntPredicate::NE, bump, ctx.pointer.null),
+      b.icmp(LLVM::IntPredicate::ULE, new_bump, limit))
+    c_small = b.icmp(LLVM::IntPredicate::ULE, total, ctx.int64.const_int(8192))
+    big_scalar = b.and(
+      b.icmp(LLVM::IntPredicate::EQ, type_ll, ctx.int32.const_int(0)),
+      b.icmp(LLVM::IntPredicate::UGE, size_ll, ctx.int64.const_int(6144)))
+    go = b.and(b.and(c_shared, c_ok), b.and(c_fit, b.and(c_small, b.not(big_scalar))))
+    b.cond(go, fast_bb, slow_bb)
+
+    b.position_at_end(fast_bb)
+    b.store(new_bump, bump_g)
+    block_ptr = b.load(ctx.pointer, gc_extern("avant_gc_block", ctx.pointer, true))
+    b.store(new_bump, b.inbounds_gep(ctx.int8, block_ptr, ctx.int64.const_int(32)))
+    flags_word = b.shl(ctx.int64.const_int(0x8020), ctx.int64.const_int(48))
+    word = b.or(
+      b.or(b.zext(b.trunc(size_ll, ctx.int32), ctx.int64),
+        b.shl(b.zext(type_ll, ctx.int64), ctx.int64.const_int(32))),
+      flags_word)
+    b.store(word, bump)
+    payload = b.inbounds_gep(ctx.int8, bump, ctx.int64.const_int(8))
+    b.call(ms_ty, ms_fn, [payload, ctx.int8.const_int(0), size_ll, ctx.int1.const_int(0)])
+    base = b.load(ctx.pointer, gc_extern("avant_gc_base", ctx.pointer, true))
+    off = b.sub(b.ptr2int(bump, ctx.int64), b.ptr2int(base, ctx.int64))
+    starts = b.load(ctx.pointer, gc_extern("avant_gc_starts", ctx.pointer, true))
+    widx = b.lshr(off, ctx.int64.const_int(9))
+    bit = b.shl(ctx.int64.const_int(1),
+      b.and(b.lshr(off, ctx.int64.const_int(3)), ctx.int64.const_int(63)))
+    wp = b.inbounds_gep(ctx.int64, starts, widx)
+    b.store(b.or(b.load(ctx.int64, wp), bit), wp)
+    stats = gc_extern("avant_g_stats", ctx.int64, false)
+    gc_add_total(b, b.inbounds_gep(ctx.int8, stats, ctx.int64.const_int(24)), total)
+    gc_add_total(b, gc_extern("avant_since_gc", ctx.int64, false), total)
+    gc_add_total(b, gc_extern("avant_nursery_held", ctx.int64, false), total)
+    gc_add_total(b, gc_extern("avant_inline_allocs", ctx.int64, false), ctx.int64.const_int(1))
+    b.br(cont_bb)
+
+    b.position_at_end(slow_bb)
+    link = builder.func_link(name, type_fn)
+    slow_result = nil.as(LLVM::Value?)
+    unless lives.empty?
+      target = LLVM::Value.new(link.llvm_function.to_unsafe)
+      emitted, wrapped = emit_statepoint_call(target, link.llvm_type, type_fn, args, lives)
+      if emitted && wrapped
+        slow_result = llvm_val(wrapped.not_nil!)
+      end
+    end
+    unless slow_result
+      slow_result = b.call(link.llvm_type, link.llvm_function, [size_ll, type_ll])
+    end
+    emit_gc_reg_clobber(name)
+    b.br(cont_bb)
+
+    b.position_at_end(cont_bb)
+    phi = b.phi(ctx.pointer, [fast_bb, slow_bb], [payload, slow_result.not_nil!])
+    wrap_val(phi, type_fn.ret, Value::PP::CallResult.new(name))
+  end
+
+  # Flag layout is AvantHeader in avant_rt.h: HEAP 0x8000, YOUNG 32,
+  # REM 16, flags at byte 6. Skip the call when the target is a heap
+  # object that is young or already remembered; the runtime call
+  # handles null, non-heap, and mature-unremembered targets.
+  private def gc_barrier_inline(name : String, type_fn : Type::Fn, obj : Value)
+    ctx = builder.context
+    fn = @func.as(Myc::Backend::Llvm::Func).link.llvm_function
+    call_bb = fn.basic_blocks.append "barrier_call"
+    test_bb = fn.basic_blocks.append "barrier_test"
+    cont_bb = fn.basic_blocks.append "barrier_cont"
+    obj_ll = llvm_val(obj)
+    is_null = @llvm_builder.icmp(LLVM::IntPredicate::EQ, obj_ll, ctx.pointer.null)
+    @llvm_builder.cond(is_null, cont_bb, test_bb)
+    @llvm_builder.position_at_end(test_bb)
+    header = @llvm_builder.inbounds_gep(ctx.int8, obj_ll, ctx.int64.const_int(-8))
+    flags_ptr = @llvm_builder.inbounds_gep(ctx.int8, header, ctx.int64.const_int(6))
+    flags = @llvm_builder.load(ctx.int16, flags_ptr)
+    heap = @llvm_builder.icmp(LLVM::IntPredicate::NE,
+      @llvm_builder.and(flags, ctx.int16.const_int(0x8000)), ctx.int16.const_int(0))
+    young_rem = @llvm_builder.icmp(LLVM::IntPredicate::NE,
+      @llvm_builder.and(flags, ctx.int16.const_int(32 | 16)), ctx.int16.const_int(0))
+    skip = @llvm_builder.and(heap, young_rem)
+    @llvm_builder.cond(skip, cont_bb, call_bb)
+    @llvm_builder.position_at_end(call_bb)
+    link = builder.func_link(name, type_fn)
+    @llvm_builder.call(link.llvm_type, link.llvm_function, [obj_ll])
+    @llvm_builder.br(cont_bb)
+    @llvm_builder.position_at_end(cont_bb)
+  end
+
+  # One avant_gc_root_begin call publishes the frame's whole slot list;
+  # each slot address is then a plain store at its fixed index. The
+  # runtime array is sized by that call, so no capacity check belongs
+  # here. Emitted once per function at entry (from visitor finish) on a
+  # dedicated builder placed right after the block's first instruction
+  # (avant_gc_enter), so this block's own builder keeps its position
+  # for the terminator Func#finish appends next.
+  def gc_root_batch_at_entry(slots : Array(Value), begin_name : String, type_fn : Type::Fn)
     return unless builder.gc_safepoints
     return if slots.empty?
-    reload = builder.gc_config.reload
-    return if reload.empty?
-    voidp = func_def.mod.typer.voidp
-    type_fn = Type::Fn.new(Location.new("", 0), [voidp], voidp)
-    link = builder.func_link(reload, type_fn)
-    link.llvm_function.add_attribute LLVM::Attribute::NoInline
+    link = builder.func_link(begin_name, type_fn)
+    ctx = builder.context
+    entry = ctx.new_builder
+    first = LibLLVM.get_first_instruction(@llvm_bb.to_unsafe)
+    return if first.null?
+    nxt = LibLLVM.get_next_instruction(first)
+    if nxt.null?
+      entry.position_at_end(@llvm_bb)
+    else
+      LibLLVM.position_builder_before(entry.to_unsafe, nxt)
+    end
+    count = ctx.int32.const_int(slots.size)
+    base = entry.call(link.llvm_type, link.llvm_function, [count])
+    slots.each_with_index do |slot, i|
+      dest = entry.inbounds_gep(ctx.pointer, base, ctx.int32.const_int(i))
+      entry.store(llvm_val(slot), dest)
+    end
+  end
+
+  def gc_reload_root_slots(slots : Array(Value))
+    # Removing this reload slowed Matmul, Brainfuck, GameOfLife, and the
+    # templates. The volatile load/store stays; Collector II Wave 0
+    # emits it inline instead of paying a noinline call per slot.
+    # MYC_GC_INLINE_RELOAD=0 restores the call for A/B measurement.
+    return unless builder.gc_safepoints
+    return if slots.empty?
+    if ENV["MYC_GC_INLINE_RELOAD"]? == "0"
+      reload = builder.gc_config.reload
+      return if reload.empty?
+      voidp = func_def.mod.typer.voidp
+      type_fn = Type::Fn.new(Location.new("", 0), [voidp], voidp)
+      link = builder.func_link(reload, type_fn)
+      link.llvm_function.add_attribute LLVM::Attribute::NoInline
+      slots.each do |slot|
+        next unless slot.type.is_a?(Type::PtrType)
+        addr = llvm_val(slot)
+        loaded = @llvm_builder.call(link.llvm_type, link.llvm_function, [addr])
+        inst = @llvm_builder.store(loaded, addr)
+        inst.volatile = true
+      end
+      return
+    end
     slots.each do |slot|
       next unless slot.type.is_a?(Type::PtrType)
       addr = llvm_val(slot)
-      loaded = @llvm_builder.call(link.llvm_type, link.llvm_function, [addr])
+      loaded = @llvm_builder.load_volatile(llvm_type(slot), addr)
       inst = @llvm_builder.store(loaded, addr)
       inst.volatile = true
     end
@@ -98,6 +290,8 @@ class Myc::Backend::Llvm::BB < Myc::Backend::AbstractBB
     return if term.null?
     LibLLVM.position_builder_before(@llvm_builder.to_unsafe, term)
   end
+
+
 
   # A --gc-leaf function cannot collect, so a pointer slot is not a
   # moving root while it runs. Volatile loads would keep the slot on

@@ -4,6 +4,9 @@
 class Myc::Backend::GcConfig
   property enabled : Bool = false
   property root : String = "gc_root"
+  # Batched registration entry (Collector II Wave 0): called once at
+  # frame entry with the root count; returns the frame's slot array.
+  property begin : String = "gc_root_begin"
   property reload : String = "gc_reload"
   property enter : String = ""
   property leave : String = ""
@@ -53,7 +56,7 @@ class Myc::Backend::GcConfig
 
   def leaf?(name : String) : Bool
     return true if @leaves.includes?(name)
-    return true if name == @root || name == @reload
+    return true if name == @root || name == @reload || name == @begin
     return true if !@enter.empty? && name == @enter
     return true if !@leave.empty? && name == @leave
     false

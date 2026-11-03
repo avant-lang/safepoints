@@ -142,7 +142,54 @@ abstract class Myc::Backend::AbstractVisitor
     return unless gc_safepoints?
     return if name && !gc_call_may_collect?(name)
     gc_register_pointer_locals
-    @bb.gc_reload_root_slots(@gc_root_slots)
+    # Reload only the slots the statepoint liveness still names. A slot
+    # nothing can read again does not need the opaque reload, and the
+    # live set is the same one the collecting call was wrapped with.
+    lives = gc_collect_stackmap_lives
+    live_ids = Set(UInt64).new
+    lives.each { |slot| live_ids << slot.object_id }
+    targets = @gc_root_slots.select { |slot| live_ids.includes?(slot.object_id) }
+    targets = @gc_root_slots if targets.empty?
+    @bb.gc_reload_root_slots(targets)
+  end
+
+  # Collector II Wave 0: with MYC_GC_ROOT_BATCH unset or "1", root
+  # registration is deferred to function finish, where one
+  # avant_gc_root_begin call publishes the whole slot list and generated
+  # code stores each slot address at its fixed index. "0" restores the
+  # per-slot avant_gc_root calls at the same entry position.
+  def gc_batch_roots? : Bool
+    ENV["MYC_GC_ROOT_BATCH"]? != "0"
+  end
+
+  def gc_flush_root_batch
+    return unless gc_safepoints?
+    return unless gc_batch_roots?
+    return if @gc_root_slots.empty?
+    saved = @bb
+    body = @func.body_bb
+    @bb = body
+    if type_fn = find_func_type_fn(builder.gc_config.begin)
+      ptr_slots = @gc_root_slots.select { |slot| slot.type.is_a?(Type::PtrType) }
+      unless ptr_slots.empty?
+        if body.is_a?(Myc::Backend::Llvm::BB)
+          # Emitted on a dedicated builder: this BB's own builder is
+          # where Func#finish is about to append the jump to the
+          # return block, and moving it corrupts that terminator.
+          body.gc_root_batch_at_entry(ptr_slots, builder.gc_config.begin, type_fn)
+        else
+          @gc_root_slots.each { |slot| emit_one_gc_root(slot) }
+        end
+      end
+    else
+      # A module that does not declare the batch entry keeps the
+      # per-slot calls, emitted here at the same entry position.
+      if body.is_a?(Myc::Backend::Llvm::BB)
+        body.gc_insert_before_terminator
+      end
+      @gc_root_slots.each { |slot| emit_one_gc_root(slot) }
+    end
+    @bb = saved
   end
 
   private def gc_root_call_result(v : Value) : Value
@@ -210,14 +257,14 @@ abstract class Myc::Backend::AbstractVisitor
     @bb = @func.alloca_bb
     ptrs = [] of Value
     collect_pointer_slots_in_entry(ref, ptrs)
-    # The slot address is computed in the alloca block. The call itself
-    # has to run after avant_gc_enter, which is the first body instruction.
-    # The first safepoint is often the loop, and that block is where the
-    # call used to be planted. The body block is usually already branched
-    # into the loop, so the call goes in before that branch.
+    # The slot address is computed in the alloca block. Registration
+    # itself has to run after avant_gc_enter, which is the first body
+    # instruction. In batch mode nothing is emitted here (the batch
+    # lands at function finish), so the body builder is left alone:
+    # moving it mid-walk would reorder the instructions that follow.
     body = @func.body_bb
     @bb = body
-    if body.is_a?(Myc::Backend::Llvm::BB)
+    if body.is_a?(Myc::Backend::Llvm::BB) && !gc_batch_roots?
       body.gc_insert_before_terminator
     end
     ptrs.each { |slot| register_one_gc_root(slot) }
@@ -237,6 +284,15 @@ abstract class Myc::Backend::AbstractVisitor
   end
 
   private def register_one_gc_root(slot : Value)
+    if gc_batch_roots?
+      @gc_root_slots << slot
+      return
+    end
+    emit_one_gc_root(slot)
+    @gc_root_slots << slot
+  end
+
+  private def emit_one_gc_root(slot : Value)
     root = builder.gc_config.root
     type_fn = find_func_type_fn(root)
     return unless type_fn
@@ -249,6 +305,5 @@ abstract class Myc::Backend::AbstractVisitor
              raise error("gc safepoint: cannot pass #{addr.type} to #{root}")
            end
     @bb.call(root, type_fn, [cast])
-    @gc_root_slots << slot
   end
 end
