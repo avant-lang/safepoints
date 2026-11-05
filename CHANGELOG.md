@@ -1,5 +1,11 @@
 # myc_llvm_safepoints changelog
 
+## Unreleased
+
+### Changed
+
+* The release `myc-llvm` links LLVM statically, together with libstdc++, pcre2, zlib, and zstd (`release-build.sh`, which the release workflow runs). It loads only glibc's libraries and libgcc_s, so a consumer no longer installs LLVM 20 (or libxml2, libffi, libedit, libzstd, libpcre2). The binary grows from 4.4 MB to about 56 MB (about 22 MB compressed); the system `libLLVM.so.20.1` it used to load is over 100 MB.
+* The LLVM target is x86 only: myc initializes AArch64, ARM, WebAssembly, or AVR on demand, which would link those targets into the static binary. Any other triple now stops with `myc-llvm (safepoints) is built for x86 only; cannot target …`. Code generation for x86_64 is unchanged (the override keeps myc's body).
 ## 0.5.0 - 2026-10-24
 
 ### Changed

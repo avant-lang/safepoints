@@ -1,4 +1,26 @@
 class Myc::Backend::Llvm::Builder < Myc::Backend::AbstractBuilder
+  # Avant targets x86_64 only. myc's own version initializes the AArch64,
+  # ARM, WebAssembly, and AVR targets on demand, which links their code into
+  # a static myc-llvm (Avant D146: X86 components only). Any other triple
+  # stops with a clear message instead of a target that was not linked.
+  # The rest is myc's body, unchanged, so x86_64 code generation is the same.
+  private def create_target_machine(triple : String)
+    unless triple =~ /^(x86_64|amd64|i[3-6]86)/i
+      raise "myc-llvm (safepoints) is built for x86 only; cannot target #{triple}"
+    end
+    LLVM.init_x86
+
+    llvm_target = LLVM::Target.from_triple(triple)
+    machine = llvm_target.create_target_machine(triple,
+      cpu: "",
+      features: "",
+      opt_level: @codegen_opt_level,
+      code_model: LLVM::CodeModel::Default,
+      reloc: LLVM::RelocMode::PIC).not_nil!
+    machine.enable_global_isel = false
+    machine
+  end
+
   def disable_fast_isel! : Nil
     LibLLVM.set_target_machine_fast_isel(target_machine, false)
   end

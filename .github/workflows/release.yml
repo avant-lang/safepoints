@@ -1,9 +1,10 @@
 # On a version tag: crystal spec, then a --release myc-llvm,
 # then a draft GitHub Release with the linux-x86_64 binary.
 #
-# Crystal 1.21 and LLVM 20 match spec.yml. The binary is dynamically
-# linked to libLLVM-20. A consumer installs LLVM 20; it does not
-# rebuild this shard.
+# Crystal 1.21 and LLVM 20 match spec.yml. release-build.sh links LLVM
+# (X86 only), libstdc++, pcre2, zlib, and zstd statically, and refuses a
+# binary that loads anything beyond glibc and libgcc_s. A consumer
+# installs nothing for the backend and does not rebuild this shard.
 #
 # The asset is `myc-llvm-linux-x86_64.tar.gz`. Inside it, the binary
 # is `myc-llvm-linux-x86_64/myc-llvm`.
@@ -50,7 +51,7 @@ jobs:
       - name: Install LLVM 20
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential llvm-20-dev
+          sudo apt-get install -y --no-install-recommends build-essential llvm-20-dev libpcre2-dev zlib1g-dev libzstd-dev
 
       - uses: crystal-lang/install-crystal@v1
         with:
@@ -65,8 +66,9 @@ jobs:
       - name: Build myc-llvm
         run: |
           set -euo pipefail
-          crystal build src/cli.cr --release -o myc-llvm
-          ./myc-llvm version
+          sh release-build.sh myc-llvm
+          ldd myc-llvm
+          ls -l myc-llvm
 
       - name: Package linux-x86_64
         run: |
@@ -81,7 +83,8 @@ jobs:
             echo "crystal: $(crystal --version)"
             echo "llvm: $(llvm-config-20 --version)"
             echo "runner: ubuntu-24.04 linux-x86_64"
-            echo "build: crystal build src/cli.cr --release -o myc-llvm"
+            echo "build: sh release-build.sh myc-llvm (crystal build --release, LLVM and C/C++ libraries static)"
+            echo "links: $(ldd myc-llvm | awk '{print $1}' | tr '\n' ' ')"
             echo "binary: myc-llvm"
           } | tee dist/myc-llvm-linux-x86_64/versions.txt dist/versions.txt
           tar -C dist -czf dist/myc-llvm-linux-x86_64.tar.gz myc-llvm-linux-x86_64
@@ -89,7 +92,7 @@ jobs:
           {
             echo "linux-x86_64 \`myc-llvm\` with pointer safepoints."
             echo
-            echo "Built with Crystal 1.21 and LLVM 20 (\`--release\`). The binary links libLLVM-20. This asset is the backend a consumer runs; the consumer does not install Crystal and does not compile this shard."
+            echo "Built with Crystal 1.21 and LLVM 20 (\`--release\`). LLVM (X86 only), libstdc++, pcre2, zlib, and zstd are linked statically: the binary loads only glibc's libraries and libgcc_s, so a consumer installs no LLVM. This asset is the backend a consumer runs; the consumer does not install Crystal and does not compile this shard."
             echo
             cat dist/versions.txt
             echo
